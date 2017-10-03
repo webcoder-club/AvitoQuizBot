@@ -7,6 +7,7 @@ import (
 	"fmt"
 	_ "github.com/lib/pq"
 	"strconv"
+	"time"
 )
 
 const (
@@ -28,13 +29,11 @@ var numericKeyboard = tgbotapi.NewReplyKeyboard(
 	),
 )
 
-//var classes = [3]string{"PHP", "Python", "Go"}
-
 func main() {
 	classes := make(map[int]string)
-	classes[0] = "PHP"
-	classes[1] = "Python"
-	classes[2] = "Go"
+	classes[1] = "PHP"
+	classes[2] = "Python"
+	classes[3] = "Go"
 
 	bot, err := tgbotapi.NewBotAPI("TOKEN")
 
@@ -61,16 +60,24 @@ func main() {
 
 	var incomeText string
 	var responseText string
-	lastId := 0
+	var userId, specialityId, answerNum int
 
 	for update := range updates {
+		var msg tgbotapi.MessageConfig
+
 		if update.CallbackQuery != nil {
-			user := getUserId(update, db)
-			var answerNum int
+			tmId := update.CallbackQuery.From.ID
 
-			if user == 0 {
+			if userId == 0 {
 				insertUser(update, db)
+			}
 
+			userId, specialityId = getUserId(tmId, db)
+
+			answerNum = getAnswerNumber(db, userId)
+			question, a1, a2, a3, a4, finish := getQuestionById(db, answerNum, specialityId)
+
+			if answerNum == 0 {
 				specialityId, _ := strconv.Atoi(update.CallbackQuery.Data)
 
 				editMessage := tgbotapi.NewEditMessageText(
@@ -81,38 +88,48 @@ func main() {
 
 				bot.Send(editMessage)
 			}
-			answerNum = getAnswerNumber(update, db, user)
 
-			if answerNum == 0 {
+			setAnswer(update, db, userId, answerNum)
 
+			if !finish {
+				var variants = make(map[int]string)
+				variants[1] = a1
+				variants[2] = a2
+				variants[3] = a3
+				variants[4] = a4
+
+				keyboard := tgbotapi.InlineKeyboardMarkup{}
+				msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, question)
+
+				for key, value := range variants {
+					var row []tgbotapi.InlineKeyboardButton
+					btn := tgbotapi.NewInlineKeyboardButtonData(value, strconv.Itoa(key))
+					row = append(row, btn)
+					keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, row)
+				}
+				msg.ReplyMarkup = keyboard
+
+				bot.Send(msg)
+			} else {
+				msg = tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, "Вы прошли опрос, ваш результат N баллов")
+				bot.Send(msg)
 			}
 
-			question, a1, a2, a3, a4 := getQuestionById(db, answerNum)
-
-			var variants = make(map[int]string)
-			variants[0] = a1
-			variants[1] = a2
-			variants[2] = a3
-			variants[3] = a4
-
-			keyboard := tgbotapi.InlineKeyboardMarkup{}
-			msg := tgbotapi.NewMessage(update.CallbackQuery.Message.Chat.ID, question)
-
-			for key, value := range variants {
-				var row []tgbotapi.InlineKeyboardButton
-				btn := tgbotapi.NewInlineKeyboardButtonData(value, strconv.Itoa(key))
-				row = append(row, btn)
-				keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, row)
+			if answerNum != 0 {
+				editMessage := tgbotapi.NewEditMessageText(
+					update.CallbackQuery.Message.Chat.ID,
+					update.CallbackQuery.Message.MessageID,
+					"Ответ №*"+strconv.Itoa(answerNum)+"* записан")
+				editMessage.ParseMode = "markdown"
+				bot.Send(editMessage)
 			}
-			msg.ReplyMarkup = keyboard
-
-			bot.Send(msg)
 
 			config := tgbotapi.CallbackConfig{
 				CallbackQueryID: update.CallbackQuery.ID,
 				Text:            "Done!",
 				ShowAlert:       false,
 			}
+
 			bot.AnswerCallbackQuery(config)
 		}
 
@@ -128,39 +145,61 @@ func main() {
 			responseText = incomeText
 		}
 
-		msg := tgbotapi.NewMessage(update.Message.Chat.ID, responseText)
+		tmId := update.Message.From.ID
+		userId, specialityId = getUserId(tmId, db)
+		answerNum = getAnswerNumber(db, userId)
 
-		// NewInlineKeyboardButtonData
-		keyboard := tgbotapi.InlineKeyboardMarkup{}
+		_, _, _, _, _, finish := getQuestionById(db, answerNum, specialityId)
 
-		for key, value := range classes {
-			var row []tgbotapi.InlineKeyboardButton
-			btn := tgbotapi.NewInlineKeyboardButtonData(value, strconv.Itoa(key))
-			row = append(row, btn)
-			keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, row)
+		if finish {
+			msg = tgbotapi.NewMessage(update.Message.Chat.ID, "Вы прошли опрос, ваш результат N баллов")
 		}
-		msg.ReplyMarkup = keyboard
 
-		//if (questions) {
-		//	msg.ReplyMarkup = numericKeyboard
-		//} else {
-		//	msg.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
-		//}
+		if userId == 0 {
+			msg = tgbotapi.NewMessage(update.Message.Chat.ID, responseText)
 
-		sm, _ := bot.Send(msg)
-		lastId = sm.MessageID
-		fmt.Println(lastId)
+			keyboard := tgbotapi.InlineKeyboardMarkup{}
+
+			for key, value := range classes {
+				var row []tgbotapi.InlineKeyboardButton
+				btn := tgbotapi.NewInlineKeyboardButtonData(value, strconv.Itoa(key))
+				row = append(row, btn)
+				keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, row)
+			}
+			msg.ReplyMarkup = keyboard
+		}
+
+		bot.Send(msg)
 	}
 }
 
-func getQuestionById(db *sql.DB, i int) (text, a1, a2, a3, a4 string) {
-	row := db.QueryRow("SELECT text, answer_1, answer_2, answer_3, answer_4  FROM questions LIMIT 1 OFFSET $1", i)
-	err := row.Scan(&text, &a1, &a2, &a3, &a4)
+func setAnswer(update tgbotapi.Update, db *sql.DB, userId int, answerId int) (lastInsertId int) {
+	err := db.QueryRow("INSERT INTO answers(user_id, speciality_id, question_id, text, created_at) VALUES($1,$2,$3,$4,$5) RETURNING id;",
+		userId,
+		1,
+		answerId,
+		update.CallbackQuery.Data,
+		time.Now().Format(time.RFC3339),
+	).Scan(&lastInsertId)
+
 	checkErr(err)
 	return
 }
 
-func getAnswerNumber(update tgbotapi.Update, db *sql.DB, userId int) (count int) {
+func getQuestionById(db *sql.DB, answerId, specialityId int) (text, a1, a2, a3, a4 string, finish bool) {
+	err := db.QueryRow("SELECT text, answer_1, answer_2, answer_3, answer_4  FROM questions WHERE speciality_id = $1 ORDER BY id ASC LIMIT 1 OFFSET $2", specialityId, answerId).Scan(&text, &a1, &a2, &a3, &a4)
+
+	if err == nil {
+		finish = false
+	} else if err == sql.ErrNoRows {
+		finish = true
+	} else {
+		panic(err)
+	}
+	return
+}
+
+func getAnswerNumber(db *sql.DB, userId int) (count int) {
 	row := db.QueryRow("SELECT COUNT(*) AS count FROM  answers WHERE user_id = $1", userId)
 	err := row.Scan(&count)
 	checkErr(err)
@@ -173,15 +212,15 @@ func checkErr(err error) {
 	}
 }
 
-func getUserId(update tgbotapi.Update, db *sql.DB) (user int) {
+func getUserId(tmid int, db *sql.DB) (user, specialityId int) {
 	user = 0
 
-	rows, err := db.Query("SELECT id FROM users WHERE tmid = $1", update.CallbackQuery.From.ID)
+	rows, err := db.Query("SELECT id, speciality_id FROM users WHERE tmid = $1", tmid)
 
 	checkErr(err)
 
 	for rows.Next() {
-		rows.Scan(&user)
+		rows.Scan(&user, &specialityId)
 	}
 
 	return
@@ -197,5 +236,4 @@ func insertUser(update tgbotapi.Update, db *sql.DB) {
 		update.CallbackQuery.Data,
 	).Scan(&lastInsertId)
 	checkErr(err)
-	fmt.Println("last inserted id =", lastInsertId)
 }
